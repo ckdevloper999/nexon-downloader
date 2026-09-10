@@ -1,109 +1,14 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
 
-const HEADERS = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Accept': '*/*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'x-ig-app-id': '936619743392459',
-  'x-asbd-id': '129477',
-  'Sec-Fetch-Site': 'same-origin'
-};
-
-// Strategy 1: Instagram Internal Web Info API
-async function fetchFromWebInfo(shortcode) {
-  try {
-    const res = await axios.get(
-      `https://www.instagram.com/api/v1/media/web_info/?shortcode=${shortcode}`,
-      { headers: HEADERS, timeout: 6000 }
-    );
-    const item = res.data?.items?.[0] || res.data?.data?.items?.[0];
-    if (item && item.video_versions && item.video_versions.length > 0) {
-      return {
-        videoUrl: item.video_versions[0].url,
-        thumbnailUrl: item.image_versions2?.candidates?.[0]?.url || null,
-        caption: item.caption?.text || null
-      };
-    }
-  } catch (_) {}
-  return null;
-}
-
-// Strategy 2: Instagram GraphQL Query
-async function fetchFromGraphQL(shortcode) {
-  try {
-    const url = `https://www.instagram.com/graphql/query/?query_hash=b3055c2c477942f81b7ade32d049688a&variables=${encodeURIComponent(
-      JSON.stringify({ shortcode })
-    )}`;
-    const res = await axios.get(url, { headers: HEADERS, timeout: 6000 });
-    const media = res.data?.data?.shortcode_media;
-    if (media && media.is_video && media.video_url) {
-      return {
-        videoUrl: media.video_url,
-        thumbnailUrl: media.display_url || null,
-        caption: media.edge_media_to_caption?.edges?.[0]?.node?.text || null
-      };
-    }
-  } catch (_) {}
-  return null;
-}
-
-// Strategy 3: Deep Embed HTML & Script Parser
-async function fetchFromEmbed(shortcode) {
-  try {
-    const embedUrl = `https://www.instagram.com/reel/${shortcode}/embed/captioned/`;
-    const res = await axios.get(embedUrl, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9'
-      },
-      timeout: 8000
-    });
-
-    const html = res.data;
-    const $ = cheerio.load(html);
-
-    let thumbnailUrl = $('meta[property="og:image"]').attr('content') || $('img.EmbeddedMediaImage').attr('src') || null;
-    let caption = $('div.Caption').text().trim() || null;
-
-    // Direct meta check
-    const metaVideo = $('meta[property="og:video"]').attr('content') || $('meta[name="twitter:player:stream"]').attr('content');
-    if (metaVideo) {
-      return { videoUrl: metaVideo, thumbnailUrl, caption };
-    }
-
-    // Unescape unicode and slashes across all script blocks
-    const rawScripts = $('script').map((_, el) => $(el).html()).get().join('\n');
-    const cleaned = rawScripts
-      .replace(/\\u0026/g, '&')
-      .replace(/\\u003C/g, '<')
-      .replace(/\\u003E/g, '>')
-      .replace(/\\\//g, '/');
-
-    // 1. Search for video_versions structure
-    const videoVersionMatch = cleaned.match(/"video_versions":\s*\[\s*\{[^}]*?"url":"([^"]+)"/);
-    if (videoVersionMatch && videoVersionMatch[1]) {
-      return { videoUrl: videoVersionMatch[1], thumbnailUrl, caption };
-    }
-
-    // 2. Search for direct CDN MP4 links
-    const mp4Matches = cleaned.match(/https:\/\/[^"\s\\]+?\.mp4[^"\s\\]*/g);
-    if (mp4Matches && mp4Matches.length > 0) {
-      return { videoUrl: mp4Matches[0], thumbnailUrl, caption };
-    }
-  } catch (_) {}
-  return null;
-}
-
+// Developer: CK INFOTECH
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
 
   const { url } = req.query;
 
@@ -111,43 +16,119 @@ module.exports = async (req, res) => {
     return res.status(400).json({
       status: false,
       developer: 'CK INFOTECH',
-      message: 'Missing URL parameter. Use: /?url=https://www.instagram.com/reel/CODE/'
+      message: 'Missing URL parameter. Example: /?url=https://www.instagram.com/reel/Cxxxxxx/'
     });
   }
 
+  // Validate Instagram shortcode
   const match = url.match(/(?:reel|p|tv)\/([A-Za-z0-9_-]+)/);
   if (!match || !match[1]) {
     return res.status(400).json({
       status: false,
       developer: 'CK INFOTECH',
-      message: 'Invalid Instagram Reel URL format.'
+      message: 'Invalid Instagram URL format.'
     });
   }
 
-  const shortcode = match[1];
+  const cleanUrl = `https://www.instagram.com/reel/${match[1]}/`;
 
-  // Try Layer 1 -> Layer 2 -> Layer 3
-  const result =
-    (await fetchFromWebInfo(shortcode)) ||
-    (await fetchFromGraphQL(shortcode)) ||
-    (await fetchFromEmbed(shortcode));
+  // Engine 1: VKr public resolver
+  async function tryEngine1(targetUrl) {
+    try {
+      const response = await axios.get(
+        `https://vkrdownloader.org/server/?api_key=vkrdownloader&vkr=${encodeURIComponent(targetUrl)}`,
+        { timeout: 9000 }
+      );
+      const data = response.data;
+      if (data && data.formats && data.formats.length > 0) {
+        const videoFormat =
+          data.formats.find((f) => f.ext === 'mp4' || f.format_id?.includes('video')) ||
+          data.formats[0];
+        return {
+          video_url: videoFormat.url,
+          thumbnail: data.thumbnail || null,
+          title: data.title || 'Instagram Reel'
+        };
+      }
+    } catch (_) {}
+    return null;
+  }
 
-  if (!result || !result.videoUrl) {
-    return res.status(404).json({
+  // Engine 2: Upstream proxy parser fallback
+  async function tryEngine2(targetUrl) {
+    try {
+      const response = await axios.post(
+        'https://worker.snapany.com/api/post',
+        { url: targetUrl },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+          },
+          timeout: 9000
+        }
+      );
+      const media = response.data?.data?.medias?.[0];
+      if (media && media.url) {
+        return {
+          video_url: media.url,
+          thumbnail: response.data?.data?.thumbnail || null,
+          title: response.data?.data?.title || 'Instagram Reel'
+        };
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // Engine 3: SaveInsta direct resolver fallback
+  async function tryEngine3(targetUrl) {
+    try {
+      const response = await axios.get(
+        `https://api.vkrdownloader.com/server/?vkr=${encodeURIComponent(targetUrl)}`,
+        { timeout: 9000 }
+      );
+      if (response.data && response.data.data?.url) {
+        return {
+          video_url: response.data.data.url,
+          thumbnail: response.data.data.thumbnail || null,
+          title: response.data.data.title || 'Instagram Reel'
+        };
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  try {
+    // Attempt multi-engine resolution
+    const media =
+      (await tryEngine1(cleanUrl)) ||
+      (await tryEngine2(cleanUrl)) ||
+      (await tryEngine3(cleanUrl));
+
+    if (!media || !media.video_url) {
+      return res.status(404).json({
+        status: false,
+        developer: 'CK INFOTECH',
+        message: 'Could not fetch video. Ensure the Reel is public and accessible.'
+      });
+    }
+
+    return res.status(200).json({
+      status: true,
+      developer: 'CK INFOTECH',
+      data: {
+        shortcode: match[1],
+        video_url: media.video_url,
+        thumbnail: media.thumbnail,
+        title: media.title
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({
       status: false,
       developer: 'CK INFOTECH',
-      message: 'Unable to extract video. The Reel might be private, restricted, or rate-limited by Instagram.'
+      message: 'Internal server error while resolving video.',
+      error: error.message
     });
   }
-
-  return res.status(200).json({
-    status: true,
-    developer: 'CK INFOTECH',
-    data: {
-      shortcode,
-      video_url: result.videoUrl,
-      thumbnail: result.thumbnailUrl,
-      caption: result.caption || 'No caption available'
-    }
-  });
 };
